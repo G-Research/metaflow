@@ -4,7 +4,7 @@
 
 This fork is meant to house G-Research's `@armada` step decorator and plugin. Hopefully only until the plugin is merged upstream.
 
-You can find documentation on how to use the `@armada` step decorator [here](https://github.com/G-Research/metaflow/blob/master/metaflow/plugins/armada/ArmadaMetaflowDecorator.m)
+You can find documentation on how to use the `@armada` step decorator [here](https://github.com/G-Research/metaflow/blob/master/metaflow/plugins/armada/ArmadaMetaflowDecorator.md)
 
 # Metaflow
 
