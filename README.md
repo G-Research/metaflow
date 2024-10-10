@@ -1,5 +1,11 @@
 ![Metaflow_Logo_Horizontal_FullColor_Ribbon_Dark_RGB](https://user-images.githubusercontent.com/763451/89453116-96a57e00-d713-11ea-9fa6-82b29d4d6eff.png)
 
+# G-Research Metaflow Fork / `@armada` Step Decorator & Plugin
+
+This fork is meant to house G-Research's `@armada` step decorator and plugin. Hopefully only until the plugin is merged upstream.
+
+You can find documentation on how to use the `@armada` step decorator [here](https://github.com/G-Research/metaflow/blob/master/metaflow/plugins/armada/ArmadaMetaflowDecorator.m)
+
 # Metaflow
 
 Metaflow is a human-friendly library that helps scientists and engineers build and manage real-life data science projects. Metaflow was [originally developed at Netflix](https://netflixtechblog.com/open-sourcing-metaflow-a-human-centric-framework-for-data-science-fa72e04a5d9) to boost productivity of data scientists who work on a wide variety of projects from classical statistics to state-of-the-art deep learning.
