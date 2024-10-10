@@ -14,7 +14,58 @@ from .armada import ArmadaException
 
 
 class ArmadaDecorator(StepDecorator):
+    """
+    Specifies that this step should execute on Armada.
+
+    Parameters
+    ----------
+    host: str, default None
+        The armada instance hostname.
+    port: str, default None
+        The armada instance port.
+    logging_host: str, default None
+        The armada logging hostname.
+    logging_port: str, default None
+        The armada logging port.
+    queue: str, default None
+        The armada queue to place the job into.
+    job_set_id: str, default None
+        The armada job set ID to place the job into.
+    cpu : int, default 1
+        Number of CPUs required for this step. If `@resources` is
+        also present, the maximum value from all decorators is used.
+    disk : int, default 10240
+        Disk size (in MB) required for this step.
+    memory : int, default 4096
+        Memory size (in MB) required for this step.
+    gpu : int, optional, default None
+        Number of NVIDIA GPUs required for this step. A value of zero implies that
+        the scheduled node should not have GPUs.
+    gpu_vendor : str, default None
+        The vendor of the GPU.
+    secrets : List[str], optional, default None
+        Kubernetes secrets to use when launching pod in Kubernetes. These
+        secrets are in addition to the ones defined in `METAFLOW_KUBERNETES_SECRETS`
+    insecure_no_ssl: Boolean, optional, default False
+        Turn off SSL for Armada related connections. Useful for debugging locally.
+    """
+
     name = "armada"
+    defaults = {
+        "cpu": "120m",
+        "disk": "10240M",
+        "memory": "1Gi",
+        "gpu": None,
+        "gpu_vendor": None,
+        "host": None,
+        "port": None,
+        "logging_host": None,
+        "logging_port": None,
+        "queue": None,
+        "job_set_id": None,
+        "secrets": None,
+        "insecure_no_ssl": False,
+    }
     package_url = None
     package_sha = None
 
@@ -22,15 +73,9 @@ class ArmadaDecorator(StepDecorator):
         super(ArmadaDecorator, self).__init__(attributes, statically_defined)
 
     def step_init(self, flow, graph, step, decos, environment, flow_datastore, logger):
-        # TODO: What datastore are we going to use? It can't be local...
-        # TODO: Will datastores work without additional armada-specific configuration?
-        if flow_datastore.TYPE not in ("s3", "azure", "gs"):
-            # FIXME: Actually raise
-            #             raise ArmadaException(
-            #                 "The *@armada* decorator requires --datastore=s3 or "
-            #                 "--datastore=azure or --datastore=gs at the moment."
-            #             )
-            pass
+        # TODO: Support other datastores?
+        if flow_datastore.TYPE not in ("s3"):
+            raise ArmadaException("The *@armada* decorator requires --datastore=s3.")
 
         # Set internal state.
         self.logger = logger
@@ -61,7 +106,6 @@ class ArmadaDecorator(StepDecorator):
         self, task_datastore, task_id, split_index, input_paths, is_cloned, ubf_context
     ):
         if not is_cloned:
-            print("runtime_task_created!")
             self._save_package_once(self.flow_datastore, self.package)
 
     def runtime_step_cli(
@@ -71,23 +115,27 @@ class ArmadaDecorator(StepDecorator):
             # after all attempts to run the user code have failed, we don't need
             # to execute on Armada anymore. We can execute possible fallback
             # code locally.
-            # FIXME: Fix this to run the armada CLI step properly.
             cli_args.commands = ["armada", "step"]
+            for key in (
+                "host",
+                "port",
+                "logging_host",
+                "logging_port",
+                "cpu",
+                "disk",
+                "memory",
+                "gpu",
+                "gpu_vendor",
+                "secrets",
+                "insecure_no_ssl",
+            ):
+                if self.attributes[key] is not None:
+                    cli_args.command_options[key] = self.attributes[key]
             cli_args.command_args.append(self.package_sha)
             cli_args.command_args.append(self.package_url)
-            # FIXME: Hard-coded for now:
-            cli_args.command_args.append("test")
-            cli_args.command_args.append("job-set-alpha")
-            cli_args.command_args.append("job-file.dummy")
-            attributes = {
-                "host": "localhost",
-                "port": "50051",
-            }
-
-            cli_args.command_options.update(attributes)
-            # cli_args.command_options = attributes
+            cli_args.command_args.append(self.attributes["queue"])
+            cli_args.command_args.append(self.attributes["job_set_id"])
             cli_args.entrypoint[0] = sys.executable
-            print(cli_args)
 
     def task_pre_step(
         self,
@@ -103,12 +151,10 @@ class ArmadaDecorator(StepDecorator):
         ubf_context,
         inputs,
     ):
-        print("armada_decorator.py: task_pre_step!")
         self.metadata = metadata
         self.task_datastore = task_datastore
 
         meta = {}
-        # meta["armada-job-id"] = os.environ["METAFLOW_ARMADA_JOB_ID"]
         entries = [
             MetaDatum(
                 field=k, value=v, type=k, tags=["attempt_id:{0}".format(retry_count)]
@@ -117,38 +163,7 @@ class ArmadaDecorator(StepDecorator):
         ]
 
         # Register book-keeping metadata for debugging.
-        print("armada_decorator.py: metadata.register_metadata!")
         self.metadata.register_metadata(run_id, step_name, task_id, entries)
-        # FIXME: Do we need to predicate this on an environment variable being set?
-        # if "METAFLOW_ARMADA_WORKLOAD" in os.environ:
-        # FIXME: Modify these to match any information we get from Armada.
-        #         meta = {}
-        #         meta["ARMADA-pod-name"] = os.environ["METAFLOW_ARMADA_POD_NAME"]
-        #         meta["ARMADA-pod-namespace"] = os.environ["METAFLOW_ARMADA_POD_NAMESPACE"]
-        #         meta["ARMADA-pod-id"] = os.environ["METAFLOW_ARMADA_POD_ID"]
-        #         meta["ARMADA-pod-service-account-name"] = os.environ[
-        #             "METAFLOW_ARMADA_SERVICE_ACCOUNT_NAME"
-        #         ]
-        #         meta["ARMADA-node-ip"] = os.environ["METAFLOW_ARMADA_NODE_IP"]
-        #
-        #         # FIXME: Need a way to fetch Armada metadata
-        #         # if ARMADA_FETCH_EC2_METADATA:
-        #         #    instance_meta = get_ec2_instance_metadata()
-        #         #    meta.update(instance_meta)
-        #
-        #         entries = [
-        #             MetaDatum(field=k, value=v, type=k, tags=[])
-        #             for k, v in meta.items()
-        #             if v is not None
-        #         ]
-        #         # Register book-keeping metadata for debugging.
-        #         print("armada_decorator.py: task_pre_step: register_metadata")
-        #         metadata.register_metadata(run_id, step_name, task_id, entries)
-
-        # Start MFLog sidecar to collect task logs.
-        # FIXME: # Do we need an Armada log sidecar?
-        # self._save_logs_sidecar = Sidecar("save_logs_periodically")
-        # self._save_logs_sidecar.start()
 
     def task_finished(
         self, step_name, flow, graph, is_task_ok, retry_count, max_retries
@@ -165,7 +180,6 @@ class ArmadaDecorator(StepDecorator):
             #        task_finished is invoked. That will result in AttributeError:
             #        'KubernetesDecorator' object has no attribute 'metadata' error.
             if self.metadata.TYPE == "local":
-                print("task_finished")
                 # Note that the datastore is *always* Amazon S3 (see
                 # runtime_task_created function).
                 sync_local_metadata_to_datastore(
@@ -178,12 +192,9 @@ class ArmadaDecorator(StepDecorator):
             # Best effort kill
             pass
 
-        pass
-
     @classmethod
     def _save_package_once(cls, flow_datastore, package):
         if cls.package_url is None:
-            print("_save_package_once in the house!")
             cls.package_url, cls.package_sha = flow_datastore.save_data(
                 [package.blob], len_hint=1
             )[0]

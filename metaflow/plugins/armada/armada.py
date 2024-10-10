@@ -4,6 +4,10 @@ import shlex
 
 from armada_client.client import ArmadaClient
 from armada_client.event import EventType
+from armada_client.k8s.io.api.core.v1 import generated_pb2 as core_v1
+from armada_client.k8s.io.apimachinery.pkg.api.resource import (
+    generated_pb2 as api_resource,
+)
 import grpc
 
 import metaflow.metaflow_config as config
@@ -52,11 +56,11 @@ def create_queue(host, port, queue, priority_factor=1, use_ssl=True):
         code = e.code()
         # Handle queue already existing.
         if code == grpc.StatusCode.ALREADY_EXISTS:
-            # FIXME: Proper logging.
-            print(f"Queue {queue} already exists")
             client.update_queue(queue_request)
         else:
-            raise e
+            raise ArmadaException(e) from e
+    except Exception as e:
+        raise ArmadaException(e) from e
 
 
 def submit_jobs(host, port, queue, job_set_id, job_request_items, use_ssl=True):
@@ -65,7 +69,6 @@ def submit_jobs(host, port, queue, job_set_id, job_request_items, use_ssl=True):
     response = client.submit_jobs(
         queue=queue, job_set_id=job_set_id, job_request_items=job_request_items
     )
-
     # Returns a list of job_ids created for this request.
     return [job_item.job_id for job_item in response.job_response_items]
 
@@ -74,43 +77,48 @@ def create_job_request_item(pod_spec, priority=1):
     # We don't actually have to use the grpc channel for this, but we do need
     # a client object.
     client = _get_client("localhost", "1234", use_ssl=False)
-    # TODO: Namespace is required all of a sudden...
     return client.create_job_request_item(
         priority=priority, namespace="default", pod_spec=pod_spec
     )
 
 
-from armada_client.k8s.io.api.core.v1 import generated_pb2 as core_v1
-from armada_client.k8s.io.apimachinery.pkg.api.resource import (
-    generated_pb2 as api_resource,
-)
-
-
-def create_armada_pod_spec(container_args, env_vars, secrets):
+def create_armada_pod_spec(
+    step_name, run_id, config_options, container_args, env_vars, secrets
+):
     """
-    Create a dummy job with a single container.
+    Create a job with a single container.
     """
+    requests = {
+        "cpu": api_resource.Quantity(string=config_options["cpu"]),
+        "memory": api_resource.Quantity(string=config_options["memory"]),
+        "ephemeral-storage": api_resource.Quantity(string=config_options["disk"]),
+    }
+    limits = {
+        "cpu": api_resource.Quantity(string=config_options["cpu"]),
+        "memory": api_resource.Quantity(string=config_options["memory"]),
+        "ephemeral-storage": api_resource.Quantity(string=config_options["disk"]),
+    }
+
+    gpu = config_options["gpu"]
+    gpu_vendor = config_options["gpu_vendor"]
+    if gpu_vendor is not None and gpu is not None:
+        request_limit_key = f"{gpu_vendor.lower()}.com/gpu"
+        requests[request_limit_key] = api_resource.Quantity(string=gpu)
+        limits[request_limit_key] = api_resource.Quantity(string=gpu)
+
+    container_name = f"metaflow-{step_name}-{run_id}".replace("_", "-")
 
     # For infomation on where this comes from,
     # see https://github.com/kubernetes/api/blob/master/core/v1/generated.proto
     pod = core_v1.PodSpec(
         containers=[
             core_v1.Container(
-                name="container1",
+                name=container_name,
+                # TODO: Allow custom image.
                 image="python:3.12",
                 args=container_args,
-                # FIXME: Running as UID 1000 causes permission issues, whats the right way to do this?
-                # UID 0 is root, probably a no-no for production.
-                securityContext=core_v1.SecurityContext(runAsUser=0),
                 resources=core_v1.ResourceRequirements(
-                    requests={
-                        "cpu": api_resource.Quantity(string="120m"),
-                        "memory": api_resource.Quantity(string="510Mi"),
-                    },
-                    limits={
-                        "cpu": api_resource.Quantity(string="120m"),
-                        "memory": api_resource.Quantity(string="510Mi"),
-                    },
+                    requests=requests, limits=limits
                 ),
                 env=[core_v1.EnvVar(name=k, value=str(v)) for k, v in env_vars.items()]
                 # And some downward API magic. Add (key, value)
@@ -134,15 +142,6 @@ def create_armada_pod_spec(container_args, env_vars, secrets):
                 + [
                     core_v1.EnvVar(name=k, value=str(v))
                     for k, v in inject_tracing_vars({}).items()
-                ]
-                + [
-                    core_v1.EnvVar(name=k, value=v)
-                    for k, v in {
-                        # FIXME: AWS secrets for S3 access.
-                        "AWS_ACCESS_KEY_ID": "test",
-                        "AWS_SECRET_ACCESS_KEY": "test",
-                        "AWS_DEFAULT_REGION": "us-east-1",
-                    }.items()
                 ],
                 envFrom=[
                     core_v1.EnvFromSource(
@@ -183,8 +182,7 @@ def generate_container_command(
         stderr_path=STDERR_PATH,
     )
     init_cmds = environment.get_package_commands(code_package_url, datastore.TYPE)
-    # FIXME: Should we support python2?
-    init_cmds.append("python3 -m pip install armada_client")
+    init_cmds.append("python3 -m pip install armada_client==0.3.0")
     init_expr = " && ".join(init_cmds)
     step_expr = bash_capture_logs(
         " && ".join(
@@ -220,7 +218,6 @@ def generate_container_command(
     cmd_str = (
         '${METAFLOW_INIT_SCRIPT:+eval \\"${METAFLOW_INIT_SCRIPT}\\"} && %s' % cmd_str
     )
-    print(f"{environment.get_environment_info()}")
     # FIXME: Sleep to make it easy to grab lobs
     return shlex.split('bash -c "sleep 15; %s"' % cmd_str)
 
@@ -232,9 +229,7 @@ def gather_metaflow_config_to_env_vars():
         "METAFLOW_DATASTORE_SYSROOT_S3": config.DATASTORE_SYSROOT_S3,
         "METAFLOW_DATATOOLS_S3ROOT": config.DATATOOLS_S3ROOT,
         "METAFLOW_DEFAULT_METADATA": config.DEFAULT_METADATA,
-        "METAFLOW_KUBERNETES_WORKLOAD": 1,
-        "METAFLOW_KUBERNETES_FETCH_EC2_METADATA": config.KUBERNETES_FETCH_EC2_METADATA,
-        "METAFLOW_RUNTIME_ENVIRONMENT": "kubernetes",
+        "METAFLOW_RUNTIME_ENVIRONMENT": "armada",
         "METAFLOW_DEFAULT_SECRETS_BACKEND_TYPE": config.DEFAULT_SECRETS_BACKEND_TYPE,
         "METAFLOW_CARD_S3ROOT": config.CARD_S3ROOT,
         "METAFLOW_DEFAULT_AWS_CLIENT_PROVIDER": config.DEFAULT_AWS_CLIENT_PROVIDER,
@@ -247,7 +242,16 @@ def gather_metaflow_config_to_env_vars():
         "METAFLOW_CARD_GSROOT": config.CARD_GSROOT,
         "METAFLOW_INIT_SCRIPT": 'echo "init script"',  # config.KUBERNETES_SANDBOX_INIT_SCRIPT,
         "METAFLOW_OTEL_ENDPOINT": config.OTEL_ENDPOINT,
+        "METAFLOW_ARMADA_WORKLOAD": 1,
     }
+
+
+TERMINAL_JOB_STATES = (
+    EventType.unable_to_schedule,
+    EventType.failed,
+    EventType.succeeded,
+    EventType.cancelled,
+)
 
 
 def wait_for_job_finish(host, port, queue, job_set_id, job_id, use_ssl=True):
@@ -260,11 +264,26 @@ def wait_for_job_finish(host, port, queue, job_set_id, job_id, use_ssl=True):
         # Look for status events related to our job_id.
         # TODO time-out mechanism.
         if event.message.job_id == job_id:
-            print(event)
-            if event.type in (
-                EventType.unable_to_schedule,
-                EventType.failed,
-                EventType.succeeded,
-                EventType.cancelled,
-            ):
+            if event.type in TERMINAL_JOB_STATES:
                 return event
+
+    raise ArmadaException(
+        "Reached end of event stream without reaching terminal job state"
+    )
+
+
+def wait_for_job_finish_generator(host, port, queue, job_set_id, job_id, use_ssl=True):
+    client = _get_client(host, port, use_ssl)
+
+    events = client.get_job_events_stream(queue, job_set_id)
+
+    for event in events:
+        event = client.unmarshal_event_response(event)
+        # Look for status events related to our job_id.
+        # TODO time-out mechanism.
+        if event.message.job_id == job_id:
+            yield event
+
+    raise ArmadaException(
+        "Reached end of event stream without reaching terminal job state"
+    )
